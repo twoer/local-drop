@@ -1,0 +1,28 @@
+# Nuxt dev/build outputs
+.nuxt/
+.output/
+.data/
+dist/
+
+# Node dependencies
+node_modules/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code 本地设置（用户特定）
+.claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/

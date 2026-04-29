@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="LocalDrop">
+  <title>LocalDrop</title>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#FFFFFF" stroke="#E5E7EB" stroke-width="1.5"/>
+  <text
+    x="32" y="48"
+    font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', 'Helvetica Neue', sans-serif"
+    font-size="40" font-weight="800"
+    fill="#1F2937" text-anchor="middle" letter-spacing="-2.5"
+  >L<tspan fill="#10B981">D</tspan></text>
+</svg>
