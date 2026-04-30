@@ -11,6 +11,7 @@ export type ClientMessage =
       clientId: ClientId
       device: Omit<DeviceInfo, 'name'>
       mode: Mode
+      preferredName?: string
     }
   | { type: 'leave-lan' }
   | { type: 'create-room' }

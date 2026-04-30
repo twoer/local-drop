@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Download, FileText, X } from 'lucide-vue-next'
+import { CheckCircle2, AlertTriangle, Download, FileText, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import type { MessageRecord } from '~/composables/useIndexedDB'
 import { isRenderable } from '~~/shared/utils/mime'
@@ -77,7 +77,23 @@ watch(previewOpen, (v) => {
 </script>
 
 <template>
-  <div class="max-w-[70%]">
+  <div class="max-w-[70%] relative">
+    <!-- 校验状态徽标 -->
+    <div
+      v-if="record.fileVerified === true"
+      class="absolute -top-1 -right-1 z-10 rounded-full bg-emerald-500 p-0.5"
+      title="文件完整性已验证"
+    >
+      <CheckCircle2 class="h-3.5 w-3.5 text-white" />
+    </div>
+    <div
+      v-else-if="record.fileVerified === false"
+      class="absolute -top-1 -right-1 z-10 rounded-full bg-red-500 p-0.5"
+      title="文件校验失败，内容可能已损坏"
+    >
+      <AlertTriangle class="h-3.5 w-3.5 text-white" />
+    </div>
+
     <!-- 图片 -->
     <button
       v-if="renderableKind === 'image' && blobUrl"

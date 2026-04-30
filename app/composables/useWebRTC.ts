@@ -6,18 +6,21 @@ import {
 } from '~~/shared/types/datachannel'
 import { decodeDataFrame } from '~~/shared/utils/dataframe'
 
-export type IceConfig = { iceServers: RTCIceServer[] }
+export type ServerConfig = {
+  iceServers: RTCIceServer[]
+  wanMaxFileSize: number
+}
 
-let _config: IceConfig | null = null
-let _configPromise: Promise<IceConfig> | null = null
+let _config: ServerConfig | null = null
+let _configPromise: Promise<ServerConfig> | null = null
 
-export function fetchIceConfig(): Promise<IceConfig> {
+export function fetchServerConfig(): Promise<ServerConfig> {
   if (_config) return Promise.resolve(_config)
   if (!_configPromise) {
     const baseURL = useRuntimeConfig().app.baseURL
     const cleaned = baseURL === '/' ? '' : baseURL.replace(/\/$/, '')
     _configPromise = fetch(`${cleaned}/api/config`)
-      .then(r => r.json() as Promise<IceConfig>)
+      .then(r => r.json() as Promise<ServerConfig>)
       .then((c) => {
         _config = c
         return c
@@ -73,7 +76,7 @@ export async function createWebRTCPeer(opts: {
   onIceCandidate: (candidate: RTCIceCandidateInit) => void
   onMessage: (ev: DcEvent) => void
 }): Promise<WebRTCPeer> {
-  const { iceServers } = await fetchIceConfig()
+  const { iceServers } = await fetchServerConfig()
   const pc = new RTCPeerConnection({ iceServers })
   const state = ref<PeerState>('connecting')
   let dc: RTCDataChannel | null = null

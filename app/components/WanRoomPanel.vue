@@ -51,8 +51,10 @@ async function copyCode() {
   const code = room.myPairing?.code
   if (!code) return
   try {
-    await navigator.clipboard.writeText(code)
-    copyHint.value = '已复制'
+    const { origin, pathname } = window.location
+    const url = `${origin}${pathname}?join=${code}`
+    await navigator.clipboard.writeText(url)
+    copyHint.value = '链接已复制'
     setTimeout(() => (copyHint.value = null), 1200)
   }
   catch {

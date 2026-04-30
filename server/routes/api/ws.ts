@@ -107,6 +107,16 @@ function handleHello(peer: Peer, msg: ClientMessageOf<'hello'>): void {
     // 宽限期内重连：复用 Client，rooms 集合保留
     existing.disconnectedAt = null
     existing.publicIp = publicIp
+
+    // 客户端改了名字：更新服务端记录并广播给同房间成员
+    if (msg.preferredName && msg.preferredName !== existing.device.name) {
+      const oldName = existing.device.name
+      existing.device = { ...existing.device, name: msg.preferredName }
+      for (const rid of existing.rooms) {
+        broadcast(rid, { type: 'peer-joined', roomId: rid, peer: existing.device }, msg.clientId)
+      }
+      logger.info('client.name-updated', { clientId: msg.clientId, oldName, newName: msg.preferredName })
+    }
     if (existing.graceTimer) {
       clearTimeout(existing.graceTimer)
       existing.graceTimer = null
@@ -137,7 +147,7 @@ function handleHello(peer: Peer, msg: ClientMessageOf<'hello'>): void {
   }
 
   // 新 client
-  const baseName = formatDeviceName(msg.device.os, msg.device.browser)
+  const baseName = msg.preferredName || formatDeviceName(msg.device.os, msg.device.browser)
   const lanRoomId = lanRoomIdOf(publicIp)
   const willJoinLan = msg.mode !== 'wan'
   const taken = willJoinLan ? roomStore.takenNamesIn(lanRoomId) : []

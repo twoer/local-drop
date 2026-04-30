@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
 import type { DeviceInfo } from '~~/shared/types/domain'
 
+const STORAGE_KEY = 'localdrop:name'
+
 export const useIdentityStore = defineStore('identity', () => {
   const clientId = ref('')
   const device = ref<DeviceInfo | null>(null)
@@ -10,8 +12,7 @@ export const useIdentityStore = defineStore('identity', () => {
     const partial = parseSelfDevice(clientId.value)
     device.value = {
       ...partial,
-      // 临时本地名；真名由 hello-ack.assignedName 回填
-      name: `${partial.os} + ${partial.browser}`,
+      name: getCustomName() ?? `${partial.os} + ${partial.browser}`,
     }
   }
 
@@ -19,5 +20,15 @@ export const useIdentityStore = defineStore('identity', () => {
     if (device.value) device.value.name = name
   }
 
-  return { clientId, device, init, setAssignedName }
+  function getCustomName(): string | null {
+    if (typeof localStorage === 'undefined') return null
+    return localStorage.getItem(STORAGE_KEY)
+  }
+
+  function setCustomName(name: string) {
+    if (typeof localStorage === 'undefined') return
+    localStorage.setItem(STORAGE_KEY, name.trim())
+  }
+
+  return { clientId, device, init, setAssignedName, getCustomName, setCustomName }
 })

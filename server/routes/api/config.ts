@@ -7,6 +7,9 @@ export default defineEventHandler(() => {
   const turnUrl = process.env.LD_TURN_URL
   const turnUsername = process.env.LD_TURN_USERNAME
   const turnCredential = process.env.LD_TURN_CREDENTIAL
+  const wanMaxFileSize = process.env.LD_WAN_MAX_FILE_SIZE
+    ? Number.parseInt(process.env.LD_WAN_MAX_FILE_SIZE, 10)
+    : 100 * 1024 * 1024 // 默认 100 MB
 
   const iceServers: RTCIceServer[] = [
     { urls: stunPrimary },
@@ -20,5 +23,5 @@ export default defineEventHandler(() => {
     })
   }
 
-  return { iceServers }
+  return { iceServers, wanMaxFileSize }
 })

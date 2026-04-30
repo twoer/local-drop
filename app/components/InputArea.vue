@@ -4,16 +4,24 @@ import { Button } from '@/components/ui/button'
 
 const peers = usePeersStore()
 const signaling = useSignalingStore()
+const notification = useNotification()
 
 const text = ref('')
 const fileInput = ref<HTMLInputElement | null>(null)
 const dragOver = ref(false)
+const isComposing = ref(false)
 
 const hasPeer = computed(() => peers.connectedControllers().size > 0)
 const canSend = computed(() => Boolean(text.value.trim()) && hasPeer.value)
 
+function onKeydown() {
+  if (isComposing.value) return
+  send()
+}
+
 function send() {
   if (!canSend.value) return
+  void notification.requestPermission()
   signaling.broadcastText(text.value)
   text.value = ''
 }
@@ -66,7 +74,25 @@ async function onPaste(e: ClipboardEvent) {
   if (files.length > 0) {
     e.preventDefault()
     await broadcastFiles(files)
+    return
   }
+  const pasted = e.clipboardData?.getData('text/plain')
+  if (pasted && pasted.length > 200 && pasted.includes('\n')) {
+    e.preventDefault()
+    textPreview.value = pasted
+  }
+}
+
+const textPreview = ref<string | null>(null)
+
+function sendPreview() {
+  if (!textPreview.value) return
+  signaling.broadcastText(textPreview.value)
+  textPreview.value = null
+}
+
+function dismissPreview() {
+  textPreview.value = null
 }
 </script>
 
@@ -103,7 +129,9 @@ async function onPaste(e: ClipboardEvent) {
       :placeholder="hasPeer ? '输入消息 / 拖入文件 / Ctrl+V 粘贴（Enter 发送，Shift+Enter 换行）' : '等待设备连接…'"
       :disabled="peers.entries.size === 0"
       class="min-h-[72px] flex-1 resize-none bg-transparent px-1 py-1.5 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
-      @keydown.enter.exact.prevent="send"
+      @keydown.enter.exact.prevent="onKeydown"
+      @compositionstart="isComposing = true"
+      @compositionend="isComposing = false"
       @paste="onPaste"
     />
     <Button type="submit" :disabled="!canSend" class="shrink-0">
@@ -116,6 +144,27 @@ async function onPaste(e: ClipboardEvent) {
       class="pointer-events-none absolute inset-0 flex items-center justify-center rounded-md bg-primary/5 text-sm font-medium text-primary"
     >
       松开发送到所有已连接设备
+    </div>
+
+    <div
+      v-if="textPreview"
+      class="absolute bottom-full left-0 right-0 mb-2 rounded-lg border bg-card p-3 shadow-lg"
+    >
+      <div class="mb-2 text-xs font-medium text-muted-foreground">
+        粘贴的文本内容
+      </div>
+      <div class="max-h-32 overflow-y-auto rounded bg-muted/50 p-2 text-xs whitespace-pre-wrap break-words">
+        {{ textPreview }}
+      </div>
+      <div class="mt-2 flex items-center justify-end gap-2">
+        <Button variant="ghost" size="sm" @click="dismissPreview">
+          取消
+        </Button>
+        <Button size="sm" :disabled="!hasPeer" @click="sendPreview">
+          <Send class="h-3.5 w-3.5" />
+          <span class="ml-1">发送</span>
+        </Button>
+      </div>
     </div>
   </form>
 </template>

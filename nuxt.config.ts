@@ -10,7 +10,7 @@ export default defineNuxtConfig({
     '@vite-pwa/nuxt',
   ],
 
-  css: ['~/assets/css/tailwind.css'],
+  css: ['~/assets/css/tailwind.css', 'vue-sonner/style.css'],
 
   vite: {
     plugins: [
@@ -86,7 +86,7 @@ export default defineNuxtConfig({
         { rel: 'icon', type: 'image/svg+xml', href: 'favicon.svg' },
       ],
       meta: [
-        { name: 'viewport', content: 'width=device-width, initial-scale=1' },
+        { name: 'viewport', content: 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover' },
         { name: 'description', content: '同局域网设备秒互传，跨网配对码加入，文件走 P2P 直连不经服务器。' },
       ],
     },

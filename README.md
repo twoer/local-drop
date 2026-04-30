@@ -78,6 +78,63 @@ location / {
 
 完整环境变量见 [`.env.example`](.env.example)。
 
+### 跨网 TURN 中继（可选）
+
+默认只配了 STUN，同网络可直连。跨网络（不同 WiFi / 4G / 强 NAT）需要 TURN 服务器中继，否则会提示「无法直连」。
+
+**1. 安装 coturn（Ubuntu/Debian）**
+
+```bash
+sudo apt install coturn
+sudo systemctl enable coturn
+```
+
+**2. 编辑 `/etc/turnserver.conf`**
+
+```ini
+fingerprint
+lt-cred-mech
+realm=localdrop
+user=localdrop:你自己的密码
+
+# 云服务器（公网 IP 经 NAT 映射）必须配置此项：
+# 格式：external-ip=公网IP/内网IP
+# 公网 IP 可用 curl -s ifconfig.me 查看，内网 IP 用 ip addr 查看
+external-ip=YOUR_PUBLIC_IP/YOUR_PRIVATE_IP
+```
+
+**3. 防火墙放行**
+
+```bash
+sudo ufw allow 3478/tcp
+sudo ufw allow 3478/udp
+sudo ufw allow 49152:65535/udp
+```
+
+云服务器还需在**安全组入站规则**中放行同样的端口（TCP 3478、UDP 3478、UDP 49152-65535）。
+
+**4. 启动**
+
+```bash
+sudo systemctl restart coturn
+```
+
+**5. LocalDrop `.env` 配置**
+
+```bash
+LD_TURN_URL=turn:YOUR_PUBLIC_IP:3478
+LD_TURN_USERNAME=localdrop
+LD_TURN_CREDENTIAL=你自己的密码
+```
+
+配置后需重启 LocalDrop 并确保环境变量生效。如果用 PM2，`pm2 reload` 不会重新加载 `.env`，需显式指定：
+
+```bash
+LD_TURN_URL=turn:YOUR_PUBLIC_IP:3478 LD_TURN_USERNAME=localdrop LD_TURN_CREDENTIAL=你自己的密码 pm2 restart local-drop --update-env
+```
+
+可通过 `curl http://localhost:3010/api/config` 确认返回的 `iceServers` 中包含 TURN 条目。
+
 ⚠️ **必须 HTTPS**（WebRTC + IndexedDB 要求安全上下文，localhost 除外）。
 ⚠️ **建议独立（子）域名部署**，不要部署到子路径（如 `example.com/local-drop/`）——nitropack 2.13 在非根 `app.baseURL` 下 WebSocket 路由解析会被静态资源中间件拦截，信令握手不会被处理（详见 nitro 在 `h3App.stack` 上的 resolver 行为）。子路径模式留待 nitro 修复后再支持。
 ⚠️ **信令为内存态，单实例部署**（v1 不支持多副本横向扩展）。
@@ -103,7 +160,7 @@ location / {
 ## 限制（v1）
 
 - 不支持文件断点续传（v1.3）
-- 不做 TURN 中继（强 NAT 双方可能打洞失败）
+- 跨网需要自建 TURN 服务器（不提供公共 TURN）
 - 不做应用层 E2EE（v1.4，已有 DTLS）
 - 不做账号 / 跨设备同步 / 离线消息
 - 单条文本上限 ~60KB（超过用文件传）

@@ -5,6 +5,7 @@ import type {
   ServerMessageOf,
 } from '~~/shared/types/signaling'
 import type { ClientId, RoomContext } from '~~/shared/types/domain'
+import { computeSha256 } from '~~/shared/utils/hash'
 import {
   createSignalingClient,
   defaultSignalingUrl,
@@ -17,7 +18,9 @@ import {
   type DcEvent,
   type WebRTCPeer,
 } from '~/composables/useWebRTC'
-import { createFileReceiver, generateFileId, sendFileToPeers } from '~/composables/useTransfer'
+import { FILE_CANCELLED, createFileReceiver, generateFileId, isTransferCancelled, sendFileToPeers, type AbortSignal } from '~/composables/useTransfer'
+import { fetchServerConfig } from '~/composables/useWebRTC'
+import { cleanupStalePartials, useDB } from '~/composables/useIndexedDB'
 import { resolveMime } from '~~/shared/utils/mime'
 
 // 文字消息单帧（JSON.stringify 后）上限：DataChannel string 帧 SCTP 限制约 64KB，留 4KB 安全边
@@ -25,10 +28,29 @@ const MAX_TEXT_FRAME_BYTES = 60 * 1024
 
 export const useSignalingStore = defineStore('signaling', () => {
   // 单例 file receiver：收到 file-meta/data/complete 都喂给它
-  const receiver = createFileReceiver()
+  const receiver = createFileReceiver(async (fileId, meta, receivedIndices) => {
+    try {
+      await useDB().partialTransfers.put({
+        id: fileId,
+        name: meta.name,
+        size: meta.size,
+        mime: meta.mime,
+        chunks: meta.chunks,
+        chunkSize: meta.chunkSize,
+        receivedChunks: receivedIndices,
+        timestamp: meta.timestamp,
+        hash: meta.hash,
+        senderClientId: undefined, // 在 signaling 层无法获知 sender，由 file-meta handler 补充
+      })
+    }
+    catch (e) {
+      console.error('partial transfer persist failed', e)
+    }
+  })
   const state = ref<SignalingState>('idle')
   const lastError = ref<string | null>(null)
   let client: SignalingClient | null = null
+  const { notifyMessage } = useNotification()
 
   // 推断 self 与 sender 之间的"主"房间上下文（LAN > my-pairing > joined-pairing）
   function contextFor(senderId: ClientId): RoomContext {
@@ -102,6 +124,9 @@ export const useSignalingStore = defineStore('signaling', () => {
       }
       watch(controller.state, (s) => {
         peers.setState(otherId, s)
+        if (s === 'connected') {
+          void checkAndResumePartialTransfers(otherId)
+        }
         if (s === 'reconnecting' && initiator) {
           if (restartTimer) return
           restartTimer = setTimeout(async () => {
@@ -143,12 +168,18 @@ export const useSignalingStore = defineStore('signaling', () => {
 
   // ============= DC 消息路由 =============
 
-  function handleDcMessage(fromClientId: ClientId, ev: DcEvent) {
+  async function handleDcMessage(fromClientId: ClientId, ev: DcEvent) {
     const peers = usePeersStore()
     const messages = useMessagesStore()
     const transfer = useTransferStore()
     const sender = peers.entries.get(fromClientId)
     if (!sender) return
+
+    // 对方改了名字：从帧中同步更新本地设备列表
+    const frame = ev.kind === 'control' ? ev.frame : null
+    if (frame && 'senderName' in frame && frame.senderName && frame.senderName !== sender.device.name) {
+      peers.upsertDevice({ ...sender.device, name: frame.senderName })
+    }
 
     if (ev.kind === 'control') {
       const f = ev.frame
@@ -157,26 +188,118 @@ export const useSignalingStore = defineStore('signaling', () => {
         // 旧客户端没带 contextKind 字段时，回退到本地按双方共有房间推断
         const ctx = f.contextKind ?? contextFor(fromClientId)
         const code = f.contextKind !== undefined ? f.contextCode : contextCodeFor(ctx)
-        messages.add({
+        const textRecord = {
           id: f.id,
           contextKind: ctx,
           contextCode: code,
-          direction: 'received',
+          direction: 'received' as const,
           senderClientId: fromClientId,
           senderName: sender.device.name,
-          kind: 'text',
+          kind: 'text' as const,
           timestamp: f.timestamp,
           text: f.content,
-        })
+        }
+        messages.add(textRecord)
+        notifyMessage(textRecord)
       }
       else if (f.type === 'file-meta') {
+        // 去重检查：本地已有相同 hash 的文件则秒传
+        if (f.hash) {
+          try {
+            const existing = await useDB().files.where('hash').equals(f.hash).first()
+            if (existing) {
+              const peer = peers.getController(fromClientId)
+              if (peer) peer.sendControl({ type: 'file-dedup-hit', id: f.id, hash: f.hash })
+              // 复制已有 blob 到 files 表（以新的 fileId 为 key，供 FileBubble 预览/下载）
+              useDB().files.put({
+                id: f.id,
+                blob: existing.blob,
+                name: f.name,
+                mime: f.mime,
+                size: f.size,
+                storedAt: Date.now(),
+                hash: f.hash,
+              }).catch((e) => {
+                console.error('dedup blob copy failed', e)
+              })
+              const ctx = contextFor(fromClientId)
+              const fileRecord = {
+                id: f.id,
+                contextKind: ctx,
+                contextCode: contextCodeFor(ctx),
+                direction: 'received' as const,
+                senderClientId: fromClientId,
+                senderName: sender.device.name,
+                kind: 'file' as const,
+                timestamp: f.timestamp,
+                fileId: f.id,
+                fileName: f.name,
+                fileSize: f.size,
+                fileMime: f.mime,
+                fileVerified: true as const,
+              }
+              messages.add(fileRecord)
+              notifyMessage(fileRecord)
+              toast.success('秒传完成', { description: f.name })
+              return
+            }
+          }
+          catch (e) {
+            console.error('dedup check failed', e)
+          }
+        }
+
+        // 续传检查：本地有部分传输记录
+        let resumeChunks: number[] | undefined
+        try {
+          const partial = await useDB().partialTransfers.get(f.id)
+          if (partial && partial.receivedChunks.length > 0) {
+            resumeChunks = partial.receivedChunks
+          }
+        }
+        catch (e) {
+          console.error('partial transfer lookup failed', e)
+        }
+
         transfer.trackIncoming({ id: f.id, name: f.name, size: f.size, mime: f.mime })
         receiver.feed(ev)
+
+        // 补全 senderClientId 以便重连时按发送方查找续传记录
+        useDB().partialTransfers.update(f.id, { senderClientId: fromClientId }).catch(() => {})
+
+        // 恢复 received 计数
+        if (resumeChunks && resumeChunks.length > 0) {
+          const chunkSize = f.chunkSize
+          const bytes = resumeChunks.reduce((sum, idx) => {
+            const start = idx * chunkSize
+            const end = Math.min(start + chunkSize, f.size)
+            return sum + (end - start)
+          }, 0)
+          transfer.progressIncoming(f.id, bytes)
+
+          const peer = peers.getController(fromClientId)
+          if (peer) {
+            peer.sendControl({ type: 'file-resume-req', id: f.id, receivedChunks: resumeChunks })
+          }
+        }
       }
       else if (f.type === 'file-complete') {
         const result = receiver.feed(ev)
-        if (result) {
+        if (result && result !== FILE_CANCELLED) {
           const ctx = contextFor(fromClientId)
+          let fileVerified: boolean | null = null
+          if (result.meta.hash) {
+            try {
+              const receivedHash = await computeSha256(await result.blob.arrayBuffer())
+              fileVerified = receivedHash === result.meta.hash
+              if (!fileVerified) {
+                toast.error('文件校验失败', { description: `${result.meta.name} 内容可能已损坏，请让对方重发` })
+              }
+            }
+            catch (e) {
+              console.error('Hash verification failed', e)
+            }
+          }
           // 落 file blob 到 IDB
           useDB().files.put({
             id: result.fileId,
@@ -185,25 +308,31 @@ export const useSignalingStore = defineStore('signaling', () => {
             mime: result.meta.mime,
             size: result.meta.size,
             storedAt: Date.now(),
+            hash: result.meta.hash,
           }).catch((e) => {
             console.error('files.put failed', e)
             toast.error('文件保存失败', { description: '本地存储可能已满' })
           })
+          // 清理部分传输记录
+          useDB().partialTransfers.delete(result.fileId).catch(() => {})
           // 写消息记录（消息 id 复用 fileId）
-          messages.add({
+          const fileRecord = {
             id: result.fileId,
             contextKind: ctx,
             contextCode: contextCodeFor(ctx),
-            direction: 'received',
+            direction: 'received' as const,
             senderClientId: fromClientId,
             senderName: sender.device.name,
-            kind: 'file',
+            kind: 'file' as const,
             timestamp: result.meta.timestamp,
             fileId: result.fileId,
             fileName: result.meta.name,
             fileSize: result.meta.size,
             fileMime: result.meta.mime,
-          })
+            fileVerified,
+          }
+          messages.add(fileRecord)
+          notifyMessage(fileRecord)
           transfer.removeIncoming(result.fileId)
         }
         else {
@@ -212,15 +341,90 @@ export const useSignalingStore = defineStore('signaling', () => {
           toast.error('文件接收失败', { description: '请让对方重发' })
         }
       }
+      else if (f.type === 'file-dedup-hit') {
+        // 发送方：接收方已拥有该文件，标记去重
+        transfer.markPeerDeduped(f.id, fromClientId)
+      }
+      else if (f.type === 'file-resume-req') {
+        // 发送方：接收方请求续传，记录需跳过的 chunk
+        transfer.setSkipChunks(f.id, fromClientId, new Set(f.receivedChunks))
+      }
       else if (f.type === 'file-error') {
         receiver.feed(ev)
         transfer.removeIncoming(f.id)
+        useDB().partialTransfers.delete(f.id).catch(() => {})
+      }
+      else if (f.type === 'file-cancel') {
+        receiver.feed(ev)
+        transfer.removeIncoming(f.id)
+        useDB().partialTransfers.delete(f.id).catch(() => {})
       }
     }
     else {
       receiver.feed(ev)
       const cur = transfer.incoming.get(ev.fileId)
       if (cur) cur.received += ev.data.byteLength
+    }
+  }
+
+  // ============= 重连续传 =============
+
+  async function checkAndResumePartialTransfers(peerClientId: ClientId) {
+    try {
+      const partials = await useDB().partialTransfers
+        .where('senderClientId').equals(peerClientId)
+        .toArray()
+      if (partials.length === 0) return
+
+      const peers = usePeersStore()
+      const transfer = useTransferStore()
+
+      for (const partial of partials) {
+        if (partial.receivedChunks.length === 0) continue
+
+        transfer.trackIncoming({
+          id: partial.id,
+          name: partial.name,
+          size: partial.size,
+          mime: partial.mime,
+        })
+
+        // 重新喂 file-meta 给 receiver，创建 Pending 条目以接收后续 chunk
+        receiver.feed({
+          kind: 'control',
+          frame: {
+            type: 'file-meta',
+            id: partial.id,
+            name: partial.name,
+            size: partial.size,
+            mime: partial.mime,
+            chunks: partial.chunks,
+            chunkSize: partial.chunkSize,
+            timestamp: partial.timestamp,
+            ...(partial.hash ? { hash: partial.hash } : {}),
+          },
+        })
+
+        // 恢复 received 计数
+        const bytes = partial.receivedChunks.reduce((sum, idx) => {
+          const start = idx * partial.chunkSize
+          const end = Math.min(start + partial.chunkSize, partial.size)
+          return sum + (end - start)
+        }, 0)
+        transfer.progressIncoming(partial.id, bytes)
+
+        const peer = peers.getController(peerClientId)
+        if (peer) {
+          peer.sendControl({
+            type: 'file-resume-req',
+            id: partial.id,
+            receivedChunks: partial.receivedChunks,
+          })
+        }
+      }
+    }
+    catch (e) {
+      console.error('resume check failed', e)
     }
   }
 
@@ -381,6 +585,7 @@ export const useSignalingStore = defineStore('signaling', () => {
           browser: identity.device?.browser ?? 'Unknown',
         },
         mode: mode.mode ?? 'smart',
+        preferredName: identity.getCustomName() ?? undefined,
       }),
     })
 
@@ -406,6 +611,7 @@ export const useSignalingStore = defineStore('signaling', () => {
 
   function start() {
     ensureClient().start()
+    void cleanupStalePartials()
   }
 
   function stop() {
@@ -494,6 +700,7 @@ export const useSignalingStore = defineStore('signaling', () => {
           timestamp: now,
           contextKind: frameKind,
           contextCode: frameCode,
+          senderName: myDevice?.name,
         })
       }
       catch (e) {
@@ -531,67 +738,89 @@ export const useSignalingStore = defineStore('signaling', () => {
     const identity = useIdentityStore()
     const messages = useMessagesStore()
     const transfer = useTransferStore()
+    const room = useRoomStore()
     const myDevice = identity.device
     if (!myDevice) return
 
     const controllers = peers.connectedControllers()
     if (controllers.size === 0) return
 
+    // 跨网文件大小限制：如果存在非 LAN 的 peer，检查限制
+    const hasWanPeer = [...controllers.keys()].some(
+      id => !room.lan?.members.some(m => m.clientId === id),
+    )
+    if (hasWanPeer) {
+      const { wanMaxFileSize } = await fetchServerConfig()
+      if (file.size > wanMaxFileSize) {
+        const limitMB = (wanMaxFileSize / 1024 / 1024).toFixed(0)
+        const fileMB = (file.size / 1024 / 1024).toFixed(1)
+        toast.error('文件过大', { description: `跨网传输上限 ${limitMB} MB，当前 ${fileMB} MB` })
+        return
+      }
+    }
+
     const fileId = generateFileId()
     const timestamp = Date.now()
     const mime = resolveMime(file)
+    const signal: AbortSignal = { aborted: false }
 
     void sendFileToPeers({
       file,
       fileId,
       peers: controllers,
       timestamp,
+      signal,
+      senderName: myDevice.name,
+      dedupedPeers: transfer.getDedupedPeers(fileId),
+      getSkipChunks: (fid, cid) => transfer.getSkipChunksMap(fid).get(cid) ?? new Set<number>(),
       onProgress: (p) => {
-        // 第一次回调时把 File 引用一起记下，后续重试用
-        transfer.trackOutgoing(p, file)
+        transfer.trackOutgoing(p, file, signal)
       },
-    }).then((finalProgress) => {
+    }).then(async (finalProgress) => {
+      if (signal.aborted) return
       const anyFailed = [...finalProgress.perPeer.values()].some(e => e.state === 'failed')
       if (anyFailed) {
         toast.error('部分设备未收到', { description: file.name })
-        // 失败的保留在 outgoing 里，让用户看到重试按钮
+        return
       }
-      else {
-        setTimeout(() => transfer.removeOutgoing(fileId), 800)
-      }
-    })
 
-    // 本地落 IDB（让自己历史里也能预览/下载）
-    try {
-      await useDB().files.put({
+      // 先落本地消息和文件，确保 FileBubble 渲染后再移除 TransferBubble，避免闪烁
+      try {
+        await useDB().files.put({
+          id: fileId,
+          blob: file,
+          name: file.name,
+          mime,
+          size: file.size,
+          storedAt: Date.now(),
+          hash: finalProgress.hash,
+        })
+      }
+      catch (e) {
+        console.error('files.put failed', e)
+        toast.error('文件保存失败', { description: '本地存储可能已满' })
+      }
+
+      const [firstPeerId] = controllers.keys()
+      const ctx = firstPeerId ? contextFor(firstPeerId) : 'lan'
+      messages.add({
         id: fileId,
-        blob: file,
-        name: file.name,
-        mime,
-        size: file.size,
-        storedAt: Date.now(),
+        contextKind: ctx,
+        contextCode: contextCodeFor(ctx),
+        direction: 'sent',
+        senderClientId: identity.clientId,
+        senderName: myDevice.name,
+        kind: 'file',
+        timestamp,
+        fileId,
+        fileName: file.name,
+        fileSize: file.size,
+        fileMime: mime,
       })
-    }
-    catch (e) {
-      console.error('files.put failed', e)
-      toast.error('文件保存失败', { description: '本地存储可能已满' })
-    }
 
-    const [firstPeerId] = controllers.keys()
-    const ctx = firstPeerId ? contextFor(firstPeerId) : 'lan'
-    void messages.add({
-      id: fileId,
-      contextKind: ctx,
-      contextCode: contextCodeFor(ctx),
-      direction: 'sent',
-      senderClientId: identity.clientId,
-      senderName: myDevice.name,
-      kind: 'file',
-      timestamp,
-      fileId,
-      fileName: file.name,
-      fileSize: file.size,
-      fileMime: mime,
+      // 等待下一帧 FileBubble 渲染后再移除 TransferBubble
+      await nextTick()
+      setTimeout(() => transfer.removeOutgoing(fileId), 300)
     })
   }
 
@@ -657,6 +886,20 @@ export const useSignalingStore = defineStore('signaling', () => {
     useTransferStore().removeOutgoing(fileId)
   }
 
+  function cancelOutgoingFile(fileId: string) {
+    const transfer = useTransferStore()
+    const sig = transfer.getOutgoingSignal(fileId)
+    if (sig) sig.aborted = true
+    transfer.cancelOutgoing(fileId)
+  }
+
+  function cancelIncomingFile(fileId: string) {
+    const transfer = useTransferStore()
+    receiver.cancel(fileId)
+    transfer.removeIncoming(fileId)
+    useDB().partialTransfers.delete(fileId).catch(() => {})
+  }
+
   return {
     state: readonly(state),
     lastError,
@@ -671,5 +914,7 @@ export const useSignalingStore = defineStore('signaling', () => {
     broadcastFile,
     retryFile,
     dismissOutgoing,
+    cancelOutgoingFile,
+    cancelIncomingFile,
   }
 })

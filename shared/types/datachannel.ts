@@ -19,6 +19,7 @@ export type ControlFrame =
       // sender 主观选择的会话上下文。可选（兼容旧客户端），缺省时接收方按"sender 在哪些房间共有"推断
       contextKind?: RoomContext
       contextCode?: string
+      senderName?: string
     }
   | {
       type: 'file-meta'
@@ -29,6 +30,8 @@ export type ControlFrame =
       chunks: number
       chunkSize: number
       timestamp: number
+      hash?: string
+      senderName?: string
     }
   | {
       type: 'file-complete'
@@ -38,6 +41,20 @@ export type ControlFrame =
       type: 'file-error'
       id: FileId
       reason: string
+    }
+  | {
+      type: 'file-cancel'
+      id: FileId
+    }
+  | {
+      type: 'file-dedup-hit'
+      id: FileId
+      hash: string
+    }
+  | {
+      type: 'file-resume-req'
+      id: FileId
+      receivedChunks: number[]
     }
 
 export type ControlFrameType = ControlFrame['type']
